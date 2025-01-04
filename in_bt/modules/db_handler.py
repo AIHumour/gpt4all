@@ -1,11 +1,42 @@
 import psycopg2
 import logging
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
+
+def sanitize_value(value):
+    """
+    Remove invalid characters (like ₹ or commas) from string values.
+    """
+    if isinstance(value, str):
+        # Remove invalid characters
+        return re.sub(r'[^\x00-\x7F]+', '', value.replace(',', '').strip())
+    return value
+
+
+def sanitize_json(data):
+    """
+    Recursively sanitize JSON data by removing invalid characters and
+    ensuring values are properly formatted.
+    """
+    if isinstance(data, dict):
+        sanitized = {}
+        for key, value in data.items():
+            if isinstance(value, (dict, list)):
+                sanitized[key] = sanitize_json(value)
+            else:
+                sanitized[key] = sanitize_value(value)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_json(item) for item in data]
+    return sanitize_value(data)
+
+
 def ensure_stock_summary_table_exists(db_params):
     """
-    Ensure the `in_stock_summary` table exists in the database.
+    Ensure the `in_stock_summary` table exists in the database with updated schema.
     """
     create_table_query = '''
     CREATE TABLE IF NOT EXISTS rawdata.in_stock_summary (
@@ -16,16 +47,14 @@ def ensure_stock_summary_table_exists(db_params):
         current_price TEXT,
         change TEXT,
         percentage_change TEXT,
-        low_today TEXT,
-        high_today TEXT,
-        low_52_week TEXT,
-        high_52_week TEXT,
-        beta TEXT,
-        price_to_book TEXT,
-        dividend_yield TEXT,
-        pe_ratio TEXT,
-        eps TEXT,
-        market_cap TEXT,
+        summary_data JSONB,
+        competitors JSONB,
+        performance JSONB,
+        performance_details JSONB,
+        about JSONB,
+        management_team JSONB,
+        swot JSONB,
+        qvt JSONB,
         created_at TIMESTAMP DEFAULT NOW()
     );
     '''
@@ -42,16 +71,16 @@ def ensure_stock_summary_table_exists(db_params):
 
 def save_stock_summary_data(db_params, data):
     """
-    Save the scraped stock summary data to the PostgreSQL database.
+    Save the scraped stock summary data to the PostgreSQL database, including the new columns.
     """
     ensure_stock_summary_table_exists(db_params)
 
     insert_query = '''
     INSERT INTO rawdata.in_stock_summary 
     (name, sector, volume, current_price, change, percentage_change, 
-    low_today, high_today, low_52_week, high_52_week, beta, 
-    price_to_book, dividend_yield, pe_ratio, eps, market_cap)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    beta, price_to_book, dividend_yield, pe_ratio, eps, market_cap, 
+    competitors, performance, performance_details, about, management_team)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     '''
 
     try:
@@ -62,96 +91,42 @@ def save_stock_summary_data(db_params, data):
                     data = [data]  # Convert to a list for uniform processing
 
                 for record in data:
-                    # Log the record being inserted
-                    logger.debug(f"Record being inserted: {record}")
+                    # Sanitize the record
+                    sanitized_record = sanitize_json(record)
 
+                    # Extract individual summary data fields
+                    summary_data = sanitized_record.get("summary_data", {})
+                    beta = summary_data.get("beta", "N/A")
+                    price_to_book = summary_data.get("price_to_book", "N/A")
+                    dividend_yield = summary_data.get("dividend_yield", "N/A")
+                    pe_ratio = summary_data.get("pe_ratio", "N/A")
+                    eps = summary_data.get("eps", "N/A")
+                    market_cap = summary_data.get("market_cap", "N/A")
+
+                    # Execute the query
                     cur.execute(
                         insert_query,
                         (
-                            record.get("name", "N/A"),
-                            record.get("sector", "N/A"),
-                            record.get("volume", "N/A"),
-                            record.get("current_price", "N/A"),
-                            record.get("change", "N/A"),
-                            record.get("percentage_change", "N/A"),
-                            record.get("low_today", "N/A"),
-                            record.get("high_today", "N/A"),
-                            record.get("low_52_week", "N/A"),
-                            record.get("high_52_week", "N/A"),
-                            record.get("Beta", "N/A"),
-                            record.get("Price-to-Book (X)*", "N/A"),
-                            record.get("Dividend Yield (%)", "N/A"),
-                            record.get("Price-to-Earnings (P/E) (X)*", "N/A"),
-                            record.get("Earnings Per Share (₹)", "N/A"),
-                            record.get("Market Cap (₹ Cr.)*", "N/A"),
+                            sanitized_record.get("name", "N/A"),
+                            sanitized_record.get("sector", "N/A"),
+                            sanitized_record.get("volume", "N/A"),
+                            sanitized_record.get("current_price", "N/A"),
+                            sanitized_record.get("change", "N/A"),
+                            sanitized_record.get("percentage_change", "N/A"),
+                            beta,
+                            price_to_book,
+                            dividend_yield,
+                            pe_ratio,
+                            eps,
+                            market_cap,
+                            json.dumps(sanitized_record.get("competitors", [])),
+                            json.dumps(sanitized_record.get("performance", {})),
+                            json.dumps(sanitized_record.get("performance_details", {})),
+                            json.dumps(sanitized_record.get("about", {})),
+                            json.dumps(sanitized_record.get("management_team", [])),
                         )
                     )
                 conn.commit()
                 logger.info("Stock summary data saved successfully.")
     except Exception as e:
         logger.error(f"Error saving stock summary data: {e}")
-
-
-
-
-def ensure_stock_analysis_table_exists(db_params):
-    """
-    Ensures the in_stock_analysis table exists in the database.
-    """
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS rawdata.in_stock_analysis (
-        id SERIAL PRIMARY KEY,
-        stock_name TEXT,
-        swot_strength TEXT,
-        swot_weakness TEXT,
-        swot_opportunity TEXT,
-        swot_threat TEXT,
-        qvt_quality TEXT,
-        qvt_valuation TEXT,
-        qvt_technicals TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """
-    try:
-        with psycopg2.connect(**db_params) as conn:
-            with conn.cursor() as cur:
-                cur.execute(create_table_query)
-                conn.commit()
-                logger.info("Ensured the `in_stock_analysis` table exists.")
-    except psycopg2.Error as e:
-        logger.error(f"Database error ensuring `in_stock_analysis`: {e}")
-        raise
-
-
-def save_stock_analysis_data(db_params, data):
-    """
-    Saves the scraped stock analysis data to the in_stock_analysis table.
-    """
-    ensure_stock_analysis_table_exists(db_params)
-
-    insert_query = """
-    INSERT INTO rawdata.in_stock_analysis 
-    (stock_name, swot_strength, swot_weakness, swot_opportunity, swot_threat, qvt_quality, qvt_valuation, qvt_technicals)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """
-    try:
-        with psycopg2.connect(**db_params) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    insert_query,
-                    (
-                        data.get("stock_name", "N/A"),
-                        data.get("swot_strength", "N/A"),
-                        data.get("swot_weakness", "N/A"),
-                        data.get("swot_opportunity", "N/A"),
-                        data.get("swot_threat", "N/A"),
-                        data.get("qvt_quality", "N/A"),
-                        data.get("qvt_valuation", "N/A"),
-                        data.get("qvt_technicals", "N/A"),
-                    )
-                )
-                conn.commit()
-                logger.info("Stock analysis data saved successfully.")
-    except psycopg2.Error as e:
-        logger.error(f"Error saving stock analysis data: {e}")
-        raise
