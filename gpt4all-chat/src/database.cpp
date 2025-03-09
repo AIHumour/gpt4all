@@ -1,10 +1,11 @@
 #include "database.h"
 
 #include "mysettings.h"
-#include "utils.h"
+#include "utils.h" // IWYU pragma: keep
 
 #include <duckx/duckx.hpp>
 #include <fmt/format.h>
+#include <usearch/index.hpp>
 #include <usearch/index_plugins.hpp>
 
 #include <QDebug>
@@ -12,9 +13,9 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileSystemWatcher>
+#include <QFlags>
 #include <QIODevice>
-#include <QPdfDocument>
-#include <QPdfSelection>
+#include <QKeyValueIterator>
 #include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -23,13 +24,23 @@
 #include <QMap>
 #include <QUtf8StringView>
 #include <QVariant>
-#include <Qt>
 #include <QtLogging>
+#include <QtMinMax>
+#include <QtTypes>
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
+
+#ifdef GPT4ALL_USE_QTPDF
+#   include <QPdfDocument>
+#   include <QPdfSelection>
+#else
+#   include <fpdfview.h>
+#   include <fpdf_doc.h>
+#   include <fpdf_text.h>
+#endif
 
 using namespace Qt::Literals::StringLiterals;
 namespace ranges = std::ranges;
@@ -37,6 +48,7 @@ namespace us = unum::usearch;
 
 //#define DEBUG
 //#define DEBUG_EXAMPLE
+
 
 namespace {
 
@@ -1103,9 +1115,9 @@ class DocumentReader {
 public:
     struct Metadata { QString title, author, subject, keywords; };
 
-    static std::unique_ptr<DocumentReader> fromDocument(const DocumentInfo &info);
+    static std::unique_ptr<DocumentReader> fromDocument(DocumentInfo info);
 
-    const DocumentInfo           &doc     () const { return *m_info; }
+    const DocumentInfo           &doc     () const { return m_info; }
     const Metadata               &metadata() const { return m_metadata; }
     const std::optional<QString> &word    () const { return m_word; }
     const std::optional<QString> &nextWord()       { m_word = advance(); return m_word; }
@@ -1115,8 +1127,8 @@ public:
     virtual ~DocumentReader() = default;
 
 protected:
-    explicit DocumentReader(const DocumentInfo &info)
-        : m_info(&info) {}
+    explicit DocumentReader(DocumentInfo info)
+        : m_info(std::move(info)) {}
 
     void postInit(Metadata &&metadata = {})
     {
@@ -1126,17 +1138,18 @@ protected:
 
     virtual std::optional<QString> advance() = 0;
 
-    const DocumentInfo     *m_info;
-    Metadata                m_metadata;
-    std::optional<QString>  m_word;
+    DocumentInfo           m_info;
+    Metadata               m_metadata;
+    std::optional<QString> m_word;
 };
 
 namespace {
 
+#ifdef GPT4ALL_USE_QTPDF
 class PdfDocumentReader final : public DocumentReader {
 public:
-    explicit PdfDocumentReader(const DocumentInfo &info)
-        : DocumentReader(info)
+    explicit PdfDocumentReader(DocumentInfo info)
+        : DocumentReader(std::move(info))
     {
         QString path = info.file.canonicalFilePath();
         if (m_doc.load(path) != QPdfDocument::Error::None)
@@ -1173,11 +1186,103 @@ private:
     QString                    m_pageText;
     std::optional<QTextStream> m_stream;
 };
+#else
+class PdfDocumentReader final : public DocumentReader {
+public:
+    explicit PdfDocumentReader(DocumentInfo info)
+        : DocumentReader(std::move(info))
+    {
+        QString path = info.file.canonicalFilePath();
+        m_doc = FPDF_LoadDocument(path.toUtf8().constData(), nullptr);
+        if (!m_doc)
+            throw std::runtime_error(fmt::format("Failed to load PDF: {}", path));
+
+        // Extract metadata
+        Metadata metadata {
+            .title    = getMetadata("Title"   ),
+            .author   = getMetadata("Author"  ),
+            .subject  = getMetadata("Subject" ),
+            .keywords = getMetadata("Keywords"),
+        };
+        postInit(std::move(metadata));
+    }
+
+    ~PdfDocumentReader() override
+    {
+        if (m_page)
+            FPDF_ClosePage(m_page);
+        if (m_doc)
+            FPDF_CloseDocument(m_doc);
+    }
+
+    int page() const override { return m_currentPage; }
+
+private:
+    std::optional<QString> advance() override
+    {
+        QString word;
+        do {
+            while (!m_stream || m_stream->atEnd()) {
+                if (m_currentPage >= FPDF_GetPageCount(m_doc))
+                    return std::nullopt;
+
+                if (m_page)
+                    FPDF_ClosePage(std::exchange(m_page, nullptr));
+                m_page = FPDF_LoadPage(m_doc, m_currentPage++);
+                if (!m_page)
+                    throw std::runtime_error("Failed to load page.");
+
+                m_pageText = extractTextFromPage(m_page);
+                m_stream.emplace(&m_pageText);
+            }
+            *m_stream >> word;
+        } while (word.isEmpty());
+        return word;
+    }
+
+    QString getMetadata(FPDF_BYTESTRING key)
+    {
+        // FPDF_GetMetaText includes a 2-byte null terminator
+        ulong nBytes = FPDF_GetMetaText(m_doc, key, nullptr, 0);
+        if (nBytes <= sizeof (FPDF_WCHAR))
+            return { "" };
+        QByteArray buffer(nBytes, Qt::Uninitialized);
+        ulong nResultBytes = FPDF_GetMetaText(m_doc, key, buffer.data(), buffer.size());
+        Q_ASSERT(nResultBytes % 2 == 0);
+        Q_ASSERT(nResultBytes <= nBytes);
+        return QString::fromUtf16(reinterpret_cast<const char16_t *>(buffer.data()), nResultBytes / 2 - 1);
+    }
+
+    QString extractTextFromPage(FPDF_PAGE page)
+    {
+        FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
+        if (!textPage)
+            throw std::runtime_error("Failed to load text page.");
+
+        int nChars = FPDFText_CountChars(textPage);
+        if (!nChars)
+            return {};
+        // FPDFText_GetText includes a 2-byte null terminator
+        QByteArray buffer((nChars + 1) * sizeof (FPDF_WCHAR), Qt::Uninitialized);
+        int nResultChars = FPDFText_GetText(textPage, 0, nChars, reinterpret_cast<ushort *>(buffer.data()));
+        Q_ASSERT(nResultChars <= nChars + 1);
+
+        FPDFText_ClosePage(textPage);
+        return QString::fromUtf16(reinterpret_cast<const char16_t *>(buffer.data()), nResultChars - 1);
+    }
+
+    FPDF_DOCUMENT              m_doc = nullptr;
+    FPDF_PAGE                  m_page = nullptr;
+    int                        m_currentPage = 0;
+    QString                    m_pageText;
+    std::optional<QTextStream> m_stream;
+};
+#endif // !defined(GPT4ALL_USE_QTPDF)
 
 class WordDocumentReader final : public DocumentReader {
 public:
-    explicit WordDocumentReader(const DocumentInfo &info)
-        : DocumentReader(info)
+    explicit WordDocumentReader(DocumentInfo info)
+        : DocumentReader(std::move(info))
         , m_doc(info.file.canonicalFilePath().toStdString())
     {
         m_doc.open();
@@ -1269,8 +1374,8 @@ protected:
 
 class TxtDocumentReader final : public DocumentReader {
 public:
-    explicit TxtDocumentReader(const DocumentInfo &info)
-        : DocumentReader(info)
+    explicit TxtDocumentReader(DocumentInfo info)
+        : DocumentReader(std::move(info))
         , m_file(info.file.canonicalFilePath())
     {
         if (!m_file.open(QIODevice::ReadOnly))
@@ -1311,13 +1416,13 @@ protected:
 
 } // namespace
 
-std::unique_ptr<DocumentReader> DocumentReader::fromDocument(const DocumentInfo &doc)
+std::unique_ptr<DocumentReader> DocumentReader::fromDocument(DocumentInfo doc)
 {
     if (doc.isPdf())
-        return std::make_unique<PdfDocumentReader>(doc);
+        return std::make_unique<PdfDocumentReader>(std::move(doc));
     if (doc.isDocx())
-        return std::make_unique<WordDocumentReader>(doc);
-    return std::make_unique<TxtDocumentReader>(doc);
+        return std::make_unique<WordDocumentReader>(std::move(doc));
+    return std::make_unique<TxtDocumentReader>(std::move(doc));
 }
 
 ChunkStreamer::ChunkStreamer(Database *database)
@@ -1325,12 +1430,12 @@ ChunkStreamer::ChunkStreamer(Database *database)
 
 ChunkStreamer::~ChunkStreamer() = default;
 
-void ChunkStreamer::setDocument(const DocumentInfo &doc, int documentId, const QString &embeddingModel)
+void ChunkStreamer::setDocument(DocumentInfo doc, int documentId, const QString &embeddingModel)
 {
     auto docKey = doc.key();
     if (!m_docKey || *m_docKey != docKey) {
         m_docKey         = docKey;
-        m_reader         = DocumentReader::fromDocument(doc);
+        m_reader         = DocumentReader::fromDocument(std::move(doc));
         m_documentId     = documentId;
         m_embeddingModel = embeddingModel;
         m_chunk.clear();
@@ -1340,7 +1445,8 @@ void ChunkStreamer::setDocument(const DocumentInfo &doc, int documentId, const Q
         if (m_database->m_documentIdCache.contains(documentId)) {
             QSqlQuery q(m_database->m_db);
             if (!m_database->removeChunksByDocumentId(q, documentId))
-                handleDocumentError("ERROR: Cannot remove chunks of document", documentId, doc.file.canonicalPath(), q.lastError());
+                handleDocumentError("ERROR: Cannot remove chunks of document",
+                                    documentId, m_reader->doc().file.canonicalPath(), q.lastError());
         }
     }
 }

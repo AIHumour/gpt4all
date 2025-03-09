@@ -1,11 +1,25 @@
 #include "codeinterpreter.h"
 
+#include <QJSEngine>
 #include <QJSValue>
-#include <QStringList>
+#include <QList>
+#include <QStringList> // IWYU pragma: keep
 #include <QThread>
 #include <QVariant>
+#include <Qt>
 
-QString CodeInterpreter::run(const QList<ToolParam> &params, qint64 timeout)
+using namespace Qt::Literals::StringLiterals;
+
+
+CodeInterpreter::CodeInterpreter()
+    : Tool()
+    , m_error(ToolEnums::Error::NoError)
+{
+    m_worker = new CodeInterpreterWorker;
+    connect(this, &CodeInterpreter::request, m_worker, &CodeInterpreterWorker::request, Qt::QueuedConnection);
+}
+
+void CodeInterpreter::run(const QList<ToolParam> &params)
 {
     m_error = ToolEnums::Error::NoError;
     m_errorString = QString();
@@ -15,27 +29,24 @@ QString CodeInterpreter::run(const QList<ToolParam> &params, qint64 timeout)
           && params.first().type == ToolEnums::ParamType::String);
 
     const QString code = params.first().value.toString();
-
-    QThread workerThread;
-    CodeInterpreterWorker worker;
-    worker.moveToThread(&workerThread);
-    connect(&worker, &CodeInterpreterWorker::finished, &workerThread, &QThread::quit, Qt::DirectConnection);
-    connect(&workerThread, &QThread::started, [&worker, code]() {
-        worker.request(code);
+    connect(m_worker, &CodeInterpreterWorker::finished, [this, params] {
+        m_error = m_worker->error();
+        m_errorString = m_worker->errorString();
+        emit runComplete({
+        ToolCallConstants::CodeInterpreterFunction,
+            params,
+            m_worker->response(),
+            m_error,
+            m_errorString
+        });
     });
-    workerThread.start();
-    bool timedOut = !workerThread.wait(timeout);
-    if (timedOut) {
-        worker.interrupt(); // thread safe
-        m_error = ToolEnums::Error::TimeoutError;
-    }
-    workerThread.quit();
-    workerThread.wait();
-    if (!timedOut) {
-        m_error = worker.error();
-        m_errorString = worker.errorString();
-    }
-    return worker.response();
+
+    emit request(code);
+}
+
+bool CodeInterpreter::interrupt()
+{
+    return m_worker->interrupt();
 }
 
 QList<ToolParamInfo> CodeInterpreter::parameters() const
@@ -86,24 +97,58 @@ QString CodeInterpreter::exampleReply() const
 
 CodeInterpreterWorker::CodeInterpreterWorker()
     : QObject(nullptr)
+    , m_engine(new QJSEngine(this))
 {
+    moveToThread(&m_thread);
+
+    QJSValue consoleInternalObject = m_engine->newQObject(&m_consoleCapture);
+    m_engine->globalObject().setProperty("console_internal", consoleInternalObject);
+
+    // preprocess console.log args in JS since Q_INVOKE doesn't support varargs
+    auto consoleObject = m_engine->evaluate(uR"(
+        class Console {
+            log(...args) {
+                if (args.length == 0)
+                    return;
+                if (args.length >= 2 && typeof args[0] === 'string')
+                    throw new Error('console.log string formatting not supported');
+                let cat = '';
+                for (const arg of args) {
+                    cat += String(arg);
+                }
+                console_internal.log(cat);
+            }
+        }
+
+        new Console();
+    )"_s);
+    m_engine->globalObject().setProperty("console", consoleObject);
+    m_thread.start();
+}
+
+void CodeInterpreterWorker::reset()
+{
+    m_response.clear();
+    m_error = ToolEnums::Error::NoError;
+    m_errorString.clear();
+    m_consoleCapture.output.clear();
+    m_engine->setInterrupted(false);
 }
 
 void CodeInterpreterWorker::request(const QString &code)
 {
-    JavaScriptConsoleCapture consoleCapture;
-    QJSValue consoleObject = m_engine.newQObject(&consoleCapture);
-    m_engine.globalObject().setProperty("console", consoleObject);
+    reset();
+    const QJSValue result = m_engine->evaluate(code);
+    QString resultString;
 
-    const QJSValue result = m_engine.evaluate(code);
-    QString resultString = result.isUndefined() ? QString() : result.toString();
-
-    // NOTE: We purposely do not set the m_error or m_errorString for the code interpreter since
-    // we *want* the model to see the response has an error so it can hopefully correct itself. The
-    // error member variables are intended for tools that have error conditions that cannot be corrected.
-    // For instance, a tool depending upon the network might set these error variables if the network
-    // is not available.
-    if (result.isError()) {
+    if (m_engine->isInterrupted()) {
+        resultString = QString("Error: code execution was interrupted or timed out.");
+   } else if (result.isError()) {
+        // NOTE: We purposely do not set the m_error or m_errorString for the code interpreter since
+        // we *want* the model to see the response has an error so it can hopefully correct itself. The
+        // error member variables are intended for tools that have error conditions that cannot be corrected.
+        // For instance, a tool depending upon the network might set these error variables if the network
+        // is not available.
         const QStringList lines = code.split('\n');
         const int line = result.property("lineNumber").toInt();
         const int index = line - 1;
@@ -114,12 +159,21 @@ void CodeInterpreterWorker::request(const QString &code)
                 .arg(lineContent);
         m_error = ToolEnums::Error::UnknownError;
         m_errorString = resultString;
+    } else {
+        resultString = result.isUndefined() ? QString() : result.toString();
     }
 
     if (resultString.isEmpty())
-        resultString = consoleCapture.output;
-    else if (!consoleCapture.output.isEmpty())
-        resultString += "\n" + consoleCapture.output;
+        resultString = m_consoleCapture.output;
+    else if (!m_consoleCapture.output.isEmpty())
+        resultString += "\n" + m_consoleCapture.output;
     m_response = resultString;
     emit finished();
+}
+
+bool CodeInterpreterWorker::interrupt()
+{
+    m_error = ToolEnums::Error::TimeoutError;
+    m_engine->setInterrupted(true);
+    return true;
 }

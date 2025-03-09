@@ -2,8 +2,10 @@
 
 #include <QDebug>
 #include <QMap>
-#include <QtGlobal>
+#include <QTextStream>
 #include <QtLogging>
+
+#include <exception>
 
 
 QList<ResultInfo> ChatItem::consolidateSources(const QList<ResultInfo> &sources)
@@ -41,6 +43,12 @@ void ChatItem::serializeText(QDataStream &stream, int version)
     stream << value;
 }
 
+void ChatItem::serializeThink(QDataStream &stream, int version)
+{
+    stream << value;
+    stream << thinkingTime;
+}
+
 void ChatItem::serializeSubItems(QDataStream &stream, int version)
 {
     stream << name;
@@ -50,6 +58,7 @@ void ChatItem::serializeSubItems(QDataStream &stream, int version)
         case ToolCall:      { serializeToolCall(stream, version);       break; }
         case ToolResponse:  { serializeToolResponse(stream, version);   break; }
         case Text:          { serializeText(stream, version);           break; }
+        case Think:         { serializeThink(stream, version);          break; }
         case System:
         case Prompt:
             throw std::invalid_argument(fmt::format("cannot serialize subitem type {}", int(typ)));
@@ -162,6 +171,13 @@ bool ChatItem::deserializeResponse(QDataStream &stream, int version)
     return true;
 }
 
+bool ChatItem::deserializeThink(QDataStream &stream, int version)
+{
+    stream >> value;
+    stream >> thinkingTime;
+    return true;
+}
+
 bool ChatItem::deserializeSubItems(QDataStream &stream, int version)
 {
     stream >> name;
@@ -177,6 +193,7 @@ bool ChatItem::deserializeSubItems(QDataStream &stream, int version)
         case ToolCall:      { deserializeToolCall(stream, version); break; }
         case ToolResponse:  { deserializeToolResponse(stream, version); break; }
         case Text:          { deserializeText(stream, version); break; }
+        case Think:         { deserializeThink(stream, version); break; }
         case System:
         case Prompt:
             throw std::invalid_argument(fmt::format("cannot serialize subitem type {}", int(typ)));

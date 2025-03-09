@@ -5,24 +5,28 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QHash>
-#include <QLatin1StringView>
+#include <QLatin1StringView> // IWYU pragma: keep
 #include <QList>
 #include <QMutex>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
-#include <QPair>
-#include <QQmlEngine>
+#include <QPair> // IWYU pragma: keep
+#include <QQmlEngine> // IWYU pragma: keep
 #include <QSortFilterProxyModel>
 #include <QSslError>
 #include <QString>
 #include <QVariant>
-#include <QVector>
+#include <QVector> // IWYU pragma: keep
 #include <Qt>
-#include <QtGlobal>
+#include <QtTypes>
 
 #include <optional>
 #include <utility>
+
+// IWYU pragma: no_forward_declare QObject
+// IWYU pragma: no_forward_declare QSslError
+class QUrl;
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -269,7 +273,7 @@ private:
             std::optional<QString> m_chatTemplate;
     mutable std::optional<QString> m_modelChatTemplate;
     QString m_systemMessage;
-    QString m_chatNamePrompt          = "Describe the above conversation in seven words or less.";
+    QString m_chatNamePrompt          = "Describe the above conversation. Your entire response must be three words or less.";
     QString m_suggestedFollowUpPrompt = "Suggest three very short factual follow-up questions that have not been answered yet or cannot be found inspired by the previous conversation and excerpts.";
     friend class MySettings;
     friend class ModelList;
@@ -529,6 +533,8 @@ public:
     bool discoverInProgress() const;
 
     Q_INVOKABLE void discoverSearch(const QString &discover);
+
+    Q_INVOKABLE QStringList remoteModelList(const QString &apiKey, const QUrl &baseUrl);
 
 Q_SIGNALS:
     void countChanged();

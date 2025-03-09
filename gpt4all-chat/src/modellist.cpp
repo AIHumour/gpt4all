@@ -9,9 +9,11 @@
 
 #include <QChar>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDebug>
 #include <QDir>
 #include <QDirIterator>
+#include <QEvent>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -29,14 +31,15 @@
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
-#include <QStringList>
+#include <QStringList> // IWYU pragma: keep
 #include <QTextStream>
 #include <QTimer>
 #include <QUrl>
+#include <QtAssert>
 #include <QtLogging>
+#include <QtPreprocessorSupport>
 
 #include <algorithm>
-#include <cstddef>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -499,10 +502,11 @@ bool GPT4AllDownloadableModels::filterAcceptsRow(int sourceRow,
     bool hasDescription = !description.isEmpty();
     bool isClone = sourceModel()->data(index, ModelList::IsCloneRole).toBool();
     bool isDiscovered = sourceModel()->data(index, ModelList::IsDiscoveredRole).toBool();
+    bool isOnline = sourceModel()->data(index, ModelList::OnlineRole).toBool();
     bool satisfiesKeyword = m_keywords.isEmpty();
     for (const QString &k : m_keywords)
         satisfiesKeyword = description.contains(k) ? true : satisfiesKeyword;
-    return !isDiscovered && hasDescription && !isClone && satisfiesKeyword;
+    return !isOnline && !isDiscovered && hasDescription && !isClone && satisfiesKeyword;
 }
 
 int GPT4AllDownloadableModels::count() const
@@ -1621,7 +1625,6 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         QString requiresVersion = obj["requires"].toString();
         QString versionRemoved = obj["removedIn"].toString();
         QString url = obj["url"].toString();
-        QByteArray modelHash = obj["md5sum"].toString().toLatin1();
         bool isDefault = obj.contains("isDefault") && obj["isDefault"] == u"true"_s;
         bool disableGUI = obj.contains("disableGUI") && obj["disableGUI"] == u"true"_s;
         QString description = obj["description"].toString();
@@ -1631,6 +1634,16 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
         QString quant = obj["quant"].toString();
         QString type = obj["type"].toString();
         bool isEmbeddingModel = obj["embeddingModel"].toBool();
+
+        QByteArray modelHash;
+        ModelInfo::HashAlgorithm hashAlgorithm;
+        if (auto it = obj.find("sha256sum"_L1); it != obj.end()) {
+            modelHash = it->toString().toLatin1();
+            hashAlgorithm = ModelInfo::Sha256;
+        } else {
+            modelHash = obj["md5sum"].toString().toLatin1();
+            hashAlgorithm = ModelInfo::Md5;
+        }
 
         // Some models aren't supported in the GUI at all
         if (disableGUI)
@@ -1660,7 +1673,7 @@ void ModelList::parseModelsJsonFile(const QByteArray &jsonData, bool save)
             { ModelList::FilenameRole, modelFilename },
             { ModelList::FilesizeRole, modelFilesize },
             { ModelList::HashRole, modelHash },
-            { ModelList::HashAlgorithmRole, ModelInfo::Md5 },
+            { ModelList::HashAlgorithmRole, hashAlgorithm },
             { ModelList::DefaultRole, isDefault },
             { ModelList::DescriptionRole, description },
             { ModelList::RequiresVersionRole, requiresVersion },
@@ -2343,4 +2356,57 @@ void ModelList::handleDiscoveryItemErrorOccurred(QNetworkReply::NetworkError cod
 
     qWarning() << u"ERROR: Discovery item failed with error code \"%1-%2\""_s
                       .arg(code).arg(reply->errorString()).toStdString();
+}
+
+QStringList ModelList::remoteModelList(const QString &apiKey, const QUrl &baseUrl)
+{
+    QStringList modelList;
+
+    // Create the request
+    QNetworkRequest request;
+    request.setUrl(baseUrl.resolved(QUrl("models")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    // Add the Authorization header
+    const QString bearerToken = QString("Bearer %1").arg(apiKey);
+    request.setRawHeader("Authorization", bearerToken.toUtf8());
+
+    // Make the GET request
+    QNetworkReply *reply = m_networkManager.get(request);
+
+    // We use a local event loop to wait for the request to complete
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    // Check for errors
+    if (reply->error() == QNetworkReply::NoError) {
+        // Parse the JSON response
+        const QByteArray responseData = reply->readAll();
+        const QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);
+
+        if (!jsonDoc.isNull() && jsonDoc.isObject()) {
+            QJsonObject rootObj = jsonDoc.object();
+            QJsonValue dataValue = rootObj.value("data");
+
+            if (dataValue.isArray()) {
+                QJsonArray dataArray = dataValue.toArray();
+                for (const QJsonValue &val : dataArray) {
+                    if (val.isObject()) {
+                        QJsonObject obj = val.toObject();
+                        const QString modelId = obj.value("id").toString();
+                        modelList.append(modelId);
+                    }
+                }
+            }
+        }
+    } else {
+        // Handle network error (e.g. print it to qDebug)
+        qWarning() << "Error retrieving models:" << reply->errorString();
+    }
+
+    // Clean up
+    reply->deleteLater();
+
+    return modelList;
 }

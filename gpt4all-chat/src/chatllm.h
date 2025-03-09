@@ -2,7 +2,7 @@
 #define CHATLLM_H
 
 #include "chatmodel.h"
-#include "database.h" // IWYU pragma: keep
+#include "database.h"
 #include "modellist.h"
 
 #include <gpt4all-backend/llmodel.h>
@@ -10,27 +10,29 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QFileInfo>
-#include <QList>      // IWYU pragma: keep
+#include <QList>
 #include <QObject>
 #include <QPointer>
 #include <QString>
 #include <QStringList> // IWYU pragma: keep
-#include <QStringView>
 #include <QThread>
 #include <QVariantMap> // IWYU pragma: keep
-#include <QtGlobal>
+#include <QtNumeric>
 
 #include <atomic>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <variant>
+#include <vector>
 
 using namespace Qt::Literals::StringLiterals;
 
+class ChatLLM;
 class QDataStream;
+
 
 // NOTE: values serialized to disk, do not change or reuse
 enum class LLModelTypeV0 { // chat versions 2-5
@@ -87,9 +89,6 @@ inline LLModelTypeV1 parseLLModelTypeV0(int v0)
     default:                       return LLModelTypeV1::NONE;
     }
 }
-
-class ChatLLM;
-class ChatModel;
 
 struct LLModelInfo {
     std::unique_ptr<LLModel> model;
@@ -285,6 +284,8 @@ private:
     bool m_isServer;
     bool m_forceMetal;
     bool m_reloadingToChangeVariant;
+    friend class ChatViewResponseHandler;
+    friend class SimpleResponseHandler;
 };
 
 #endif // CHATLLM_H

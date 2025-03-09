@@ -7,16 +7,23 @@
 
 #include <QAbstractListModel>
 #include <QByteArray>
+#include <QDate>
 #include <QDebug>
 #include <QHash>
 #include <QList>
+#include <QMutex>
 #include <QObject>
+#include <QString>
 #include <QThread>
 #include <QVariant>
-#include <QVector>
+#include <QVector> // IWYU pragma: keep
 #include <Qt>
-#include <QtGlobal>
+#include <QtAssert>
 #include <QtLogging>
+#include <QtPreprocessorSupport>
+
+#include <memory>
+
 
 class ChatsRestoreThread : public QThread
 {
@@ -33,6 +40,7 @@ class ChatSaver : public QObject
     Q_OBJECT
 public:
     explicit ChatSaver();
+    ~ChatSaver() override;
 
 Q_SIGNALS:
     void saveChatsFinished();
@@ -42,6 +50,7 @@ public Q_SLOTS:
 
 private:
     QThread m_thread;
+    QMutex  m_mutex;
 };
 
 class ChatListModel : public QAbstractListModel
@@ -228,6 +237,7 @@ public:
 
     void removeChatFile(Chat *chat) const;
     Q_INVOKABLE void saveChats();
+    Q_INVOKABLE void saveChatsForQuit();
     void restoreChat(Chat *chat);
     void chatsRestoredFinished();
 
@@ -244,6 +254,9 @@ protected:
     bool eventFilter(QObject *obj, QEvent *ev) override;
 
 private Q_SLOTS:
+    // Used with QCoreApplication::aboutToQuit. Does not require an event loop.
+    void saveChatsSync();
+
     void newChatCountChanged()
     {
         Q_ASSERT(m_newChat && m_newChat->chatModel()->count());
@@ -275,10 +288,15 @@ private Q_SLOTS:
     }
 
 private:
+    QVector<Chat *> getChatsToSave() const;
+
+private:
     Chat* m_newChat = nullptr;
     Chat* m_serverChat = nullptr;
     Chat* m_currentChat = nullptr;
     QList<Chat*> m_chats;
+    std::unique_ptr<ChatSaver> m_chatSaver;
+    bool m_startedFinalSave = false;
 
 private:
     explicit ChatListModel();

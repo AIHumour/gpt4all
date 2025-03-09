@@ -3,20 +3,25 @@
 
 #include "chatllm.h"
 #include "chatmodel.h"
-#include "database.h" // IWYU pragma: keep
-#include "localdocsmodel.h" // IWYU pragma: keep
+#include "database.h"
+#include "localdocsmodel.h"
 #include "modellist.h"
+#include "tool.h"
 
 #include <QDateTime>
 #include <QList>
 #include <QObject>
-#include <QQmlEngine>
+#include <QQmlEngine> // IWYU pragma: keep
 #include <QString>
 #include <QStringList> // IWYU pragma: keep
-#include <QStringView>
-#include <QtGlobal>
+#include <QUrl>
+#include <QVariant>
+#include <QtTypes>
 
+// IWYU pragma: no_forward_declare LocalDocsCollectionsModel
+// IWYU pragma: no_forward_declare ToolCallInfo
 class QDataStream;
+
 
 class Chat : public QObject
 {
@@ -55,7 +60,8 @@ public:
         LocalDocsProcessing,
         PromptProcessing,
         GeneratingQuestions,
-        ResponseGeneration
+        ResponseGeneration,
+        ToolCallGeneration
     };
     Q_ENUM(ResponseState)
 
@@ -166,6 +172,9 @@ private Q_SLOTS:
     void promptProcessing();
     void generatingQuestions();
     void responseStopped(qint64 promptResponseMs);
+    void processToolCall(const QString &toolCall);
+    void toolCallComplete(const ToolCallInfo &info);
+    void responseComplete();
     void generatedNameChanged(const QString &name);
     void generatedQuestionFinished(const QString &question);
     void handleModelLoadingError(const QString &error);

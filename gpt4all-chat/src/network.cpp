@@ -8,7 +8,6 @@
 #include "localdocsmodel.h"
 #include "modellist.h"
 #include "mysettings.h"
-#include "utils.h"
 
 #include <gpt4all-backend/llmodel.h>
 
@@ -29,7 +28,6 @@
 #include <QSslSocket>
 #include <QSysInfo>
 #include <Qt>
-#include <QtGlobal>
 #include <QtLogging>
 #include <QUrl>
 #include <QUuid>
@@ -48,6 +46,7 @@ using namespace Qt::Literals::StringLiterals;
 
 #define STR_(x) #x
 #define STR(x) STR_(x)
+
 
 static const char MIXPANEL_TOKEN[] = "ce362e568ddaee16ed243eaffb5860a2";
 
@@ -241,6 +240,12 @@ void Network::handleJsonUploadFinished()
         return;
 
     m_activeUploads.removeAll(jsonReply);
+
+    if (jsonReply->error() != QNetworkReply::NoError) {
+        qWarning() << "Request to" << jsonReply->url().toString() << "failed:" << jsonReply->errorString();
+        jsonReply->deleteLater();
+        return;
+    }
 
     QVariant response = jsonReply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
     Q_ASSERT(response.isValid());
@@ -449,6 +454,11 @@ void Network::handleIpifyFinished()
     QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
     if (!reply)
         return;
+    if (reply->error() != QNetworkReply::NoError) {
+        qWarning() << "Request to" << reply->url().toString() << "failed:" << reply->errorString();
+        reply->deleteLater();
+        return;
+    }
 
     QVariant response = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
     Q_ASSERT(response.isValid());
@@ -473,6 +483,11 @@ void Network::handleMixpanelFinished()
     QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
     if (!reply)
         return;
+    if (reply->error() != QNetworkReply::NoError) {
+        qWarning() << "Request to" << reply->url().toString() << "failed:" << reply->errorString();
+        reply->deleteLater();
+        return;
+    }
 
     QVariant response = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
     Q_ASSERT(response.isValid());
@@ -511,6 +526,11 @@ void Network::handleHealthFinished()
     QNetworkReply *healthReply = qobject_cast<QNetworkReply *>(sender());
     if (!healthReply)
         return;
+    if (healthReply->error() != QNetworkReply::NoError) {
+        qWarning() << "Request to" << healthReply->url().toString() << "failed:" << healthReply->errorString();
+        healthReply->deleteLater();
+        return;
+    }
 
     QVariant response = healthReply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
     Q_ASSERT(response.isValid());
